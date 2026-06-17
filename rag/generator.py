@@ -60,6 +60,11 @@ CRITICAL FORMATTING RULES:
 2. Write formulas in plain readable text.
 3. Use only simple symbols:
    = + - * / ^ ( )
+4. NEVER generate markdown image syntax like ![...](...) or any image links.
+   Charts are rendered separately by the application — do not reference,
+   describe as embedded, or attempt to insert any image markdown yourself.
+   If you want to mention a chart exists, just describe it in plain text
+   (e.g. "see the chart below") without any markdown image tag.
 
 Conversation History:
 {chat_history}
