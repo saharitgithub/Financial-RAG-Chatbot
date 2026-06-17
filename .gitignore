@@ -2,4 +2,5 @@ venv/
 .streamlit/secrets.toml
 __pycache__/
 *.pyc
-*.pkl
+faiss_store.index
+faiss_store.texts.pkl
