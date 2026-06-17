@@ -88,26 +88,26 @@ hr { border-color: #2a2a3a; }
 
 @st.cache_resource
 def load_store():
-    if not os.path.exists("faiss_store.pkl"):
+    from vectorstore.faiss_store import VectorStore
+
+    if not os.path.exists("faiss_store.index"):
         with st.spinner("🔧 First-time setup: building knowledge base from PDFs... this may take a few minutes."):
             from ingestion.load_pdfs import load_pdfs
             from ingestion.chunker import chunk_text
-            from vectorstore.faiss_store import VectorStore
- 
+
             build = VectorStore()
             docs = load_pdfs("data")
- 
+
             for doc in docs:
                 chunks = chunk_text(doc)
                 for c in chunks:
                     emb = get_embedding(c)
                     build.add(emb, c)
- 
-            with open("faiss_store.pkl", "wb") as f:
-                pickle.dump(build, f)
-    
-    with open("faiss_store.pkl", "rb") as f:
-        return pickle.load(f)
+
+            build.save("faiss_store")
+            return build
+
+    return VectorStore.load("faiss_store")
 
 store = load_store()
 

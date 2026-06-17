@@ -2,7 +2,6 @@ from ingestion.load_pdfs import load_pdfs
 from ingestion.chunker import chunk_text
 from embeddings.embedder import get_embedding
 from vectorstore.faiss_store import VectorStore
-import pickle
 
 store = VectorStore()
 
@@ -22,7 +21,6 @@ for doc in docs:
 print(f"Total chunks indexed: {total_chunks}")
 print("✅ FAISS INDEX BUILT SUCCESSFULLY")
 
-with open("faiss_store.pkl", "wb") as f:
-    pickle.dump(store, f)
+store.save("faiss_store")
 
-print("✅ INDEX SAVED")
+print("✅ INDEX SAVED (faiss_store.index + faiss_store.texts.pkl)")
