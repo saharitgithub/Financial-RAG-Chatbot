@@ -6,11 +6,13 @@ finance_data.py
 - Period detected from query (default current/instant for switch)
 - Spelling corrector: fuzzy word-by-word
 - Weekly OHLC always shown
+- Crypto detection supported (BTC-USD, ETH-USD, etc.)
 """
 
 import yfinance as yf
 import streamlit as st
 import re
+import pandas as pd
 from datetime import datetime, timedelta
 from difflib import get_close_matches
 
@@ -54,6 +56,14 @@ NAME_TO_TICKER = {
     "procter": "PG", "p&g": "PG", "colgate": "CL",
     "at&t": "T", "verizon": "VZ", "t-mobile": "TMUS", "tmobile": "TMUS",
     "tesla": "TSLA", "tsla": "TSLA",
+    # Lowercase ticker symbols for natural language queries
+    "amzn": "AMZN", "aapl": "AAPL", "msft": "MSFT", "nvda": "NVDA",
+    "googl": "GOOGL", "goog": "GOOGL", "nflx": "NFLX",
+    "dis": "DIS", "spot": "SPOT", "intc": "INTC",
+    "qcom": "QCOM", "orcl": "ORCL", "jpm": "JPM", "gs": "GS",
+    "bac": "BAC", "wfc": "WFC", "xom": "XOM", "cvx": "CVX",
+    "jnj": "JNJ", "pfe": "PFE", "mrk": "MRK", "unh": "UNH",
+    "wmt": "WMT", "ko": "KO", "pep": "PEP", "pg": "PG",
 }
 
 # Crypto tickers — yfinance uses BTC-USD format
@@ -68,6 +78,19 @@ CRYPTO_NAME_MAP = {
     "ltc": "LTC-USD", "litecoin": "LTC-USD",
     "dot": "DOT-USD", "polkadot": "DOT-USD",
     "avax": "AVAX-USD", "avalanche": "AVAX-USD",
+}
+
+CRYPTO_DESCRIPTIONS = {
+    "BTC-USD":  "Bitcoin (BTC) is the world's first and largest cryptocurrency by market cap. It is a decentralized digital currency that operates without a central bank, using blockchain technology for peer-to-peer transactions.",
+    "ETH-USD":  "Ethereum (ETH) is a decentralized blockchain platform that enables smart contracts and decentralized applications (dApps). It is the second largest cryptocurrency by market cap.",
+    "DOGE-USD": "Dogecoin (DOGE) started as a meme cryptocurrency in 2013 but gained massive popularity, largely driven by social media and endorsements from Elon Musk. It uses a Proof-of-Work consensus and is widely used for tipping and micro-transactions.",
+    "SOL-USD":  "Solana (SOL) is a high-performance blockchain supporting smart contracts and DeFi applications, known for extremely fast transaction speeds and low fees.",
+    "BNB-USD":  "Binance Coin (BNB) is the native cryptocurrency of the Binance exchange ecosystem, used for trading fee discounts, token sales, and powering the BNB Smart Chain.",
+    "XRP-USD":  "XRP is the native token of the Ripple network, designed for fast, low-cost international money transfers between financial institutions.",
+    "ADA-USD":  "Cardano (ADA) is a proof-of-stake blockchain platform built with a research-driven approach, focused on security, scalability, and sustainability.",
+    "LTC-USD":  "Litecoin (LTC) is one of the earliest altcoins, designed as a faster and lighter version of Bitcoin with lower transaction fees.",
+    "DOT-USD":  "Polkadot (DOT) is a multi-chain protocol that enables different blockchains to transfer messages and value in a trust-free fashion.",
+    "AVAX-USD": "Avalanche (AVAX) is a smart contract platform competing with Ethereum, known for fast finality and a unique consensus mechanism.",
 }
 
 TICKER_SPELLING = {
@@ -95,12 +118,21 @@ FINANCE_SPELLING = {
     "var": "VaR (Value at Risk)", "cvar": "CVaR (Conditional Value at Risk)",
 }
 
+
 # =========================================
 # SPELLING DETECTOR
 # =========================================
 
+def _spelling_card(wrote: str, shown_name: str, ticker: str) -> str:
+    return (
+        f"**Spelling Correction** ✅\n\n"
+        f"- You wrote : `{wrote}`\n"
+        f"- Correct   : **{shown_name}** (ticker: **{ticker}**)"
+    )
+
+
 def detect_spelling_query(query: str):
-    q        = query.strip().lower()
+    q = query.strip().lower()
     triggers = [
         "spelling", "spell", "correct spelling", "how to spell",
         "what is spelling", "what is the spelling", "speling", "spelng", "correct spell",
@@ -118,6 +150,7 @@ def detect_spelling_query(query: str):
 
     words = clean.split()
 
+    # 1. Already a valid ticker
     for word in words:
         upper = word.upper()
         if upper in ALL_TICKERS:
@@ -125,29 +158,32 @@ def detect_spelling_query(query: str):
             name = info.get("longName", upper) if "error" not in info else upper
             return f"**Spelling Confirmed** ✅\n\n- Ticker : **{upper}**\n- Name   : {name}\n- Status : Correct!"
 
+    # 2. Known misspelling table
     for word in words:
         if word in TICKER_SPELLING:
             correct = TICKER_SPELLING[word]
-            info    = get_ticker_info(correct)
-            name    = info.get("longName", correct) if "error" not in info else correct
-            return f"**Spelling Correction** ✅\n\n- You wrote : `{word.upper()}`\n- Correct   : **{correct}**\n- Full Name : {name}"
+            info = get_ticker_info(correct)
+            name = info.get("longName", correct) if "error" not in info else correct
+            return _spelling_card(word, name, correct)       # FIX: name first, input as typed
 
+    # 3. Company-name fuzzy match BEFORE ticker fuzzy match: the user is asking how to
+    #    spell a word, so the answer should be the company name, not just a ticker.
+    for word in words:
+        nm = get_close_matches(word, list(NAME_TO_TICKER.keys()), n=1, cutoff=0.6)
+        if nm:
+            ct = NAME_TO_TICKER[nm[0]]
+            return _spelling_card(word, nm[0].title(), ct)
+
+    # 4. Ticker fuzzy match
     for word in words:
         matches = get_close_matches(word.upper(), ALL_TICKERS, n=1, cutoff=0.6)
         if matches:
             correct = matches[0]
-            info    = get_ticker_info(correct)
-            name    = info.get("longName", correct) if "error" not in info else correct
-            return f"**Spelling Correction** ✅\n\n- You wrote : `{word.upper()}`\n- Correct   : **{correct}**\n- Full Name : {name}"
+            info = get_ticker_info(correct)
+            name = info.get("longName", correct) if "error" not in info else correct
+            return _spelling_card(word, name, correct)
 
-    for word in words:
-        nm = get_close_matches(word, list(NAME_TO_TICKER.keys()), n=1, cutoff=0.6)
-        if nm:
-            ct   = NAME_TO_TICKER[nm[0]]
-            info = get_ticker_info(ct)
-            fn   = info.get("longName", ct) if "error" not in info else ct
-            return f"**Spelling Correction** ✅\n\n- You wrote : `{word}`\n- Correct   : **{nm[0].title()}** (Ticker: **{ct}**)\n- Full Name : {fn}"
-
+    # 5. Finance terms
     tm = get_close_matches(clean, list(FINANCE_SPELLING.keys()), n=1, cutoff=0.6)
     if tm:
         full = FINANCE_SPELLING[tm[0]]
@@ -164,34 +200,41 @@ def detect_spelling_query(query: str):
 # =========================================
 
 def detect_tickers(query: str) -> list:
-    q, found = query.strip(), []
+    """All tickers mentioned in the query, in the order they were mentioned
+    ("google vs microsoft" -> ["GOOGL", "MSFT"])."""
+    q       = query.strip()
+    q_lower = q.lower()
+    hits    = []   # (position in query, ticker)
 
     # Stock tickers — uppercase symbols
-    for word in re.findall(r'\b[A-Z]{1,5}(?:-[A-Z])?\b', q):
-        if word in ALL_TICKERS and word not in found:
-            found.append(word)
+    for m in re.finditer(r'\b[A-Z]{1,5}(?:-[A-Z]{2,3})?\b', q):
+        if m.group(0) in ALL_TICKERS:
+            hits.append((m.start(), m.group(0)))
 
-    q_lower = q.lower()
+    # Company names, misspelled tickers, crypto names
+    for table in (NAME_TO_TICKER, TICKER_SPELLING, CRYPTO_NAME_MAP):
+        for name, ticker in table.items():
+            pos = q_lower.find(name)
+            if pos != -1:
+                hits.append((pos, ticker))
 
-    # Company names
-    for name, ticker in NAME_TO_TICKER.items():
-        if name in q_lower and ticker not in found:
+    found = []
+    for _, ticker in sorted(hits, key=lambda h: h[0]):   # stable: ties keep detection order
+        if ticker not in found:
             found.append(ticker)
+    return found
 
-    # Misspelled tickers
-    for wrong, correct in TICKER_SPELLING.items():
-        if wrong in q_lower and correct not in found:
-            found.append(correct)
 
-    # ── Crypto detection — MUST be before return ──
-    for name, crypto_ticker in CRYPTO_NAME_MAP.items():
-        if name in q_lower and crypto_ticker not in found:
-            found.append(crypto_ticker)
-
-    return found  # ← return is LAST, after all detection
+def typo_correction_note(query: str) -> str:
+    """One-line notice when a known misspelling (e.g. 'nvdia') was silently corrected."""
+    for word in re.findall(r"[a-z&\-]+", query.lower()):
+        if word in TICKER_SPELLING:
+            return f"*Showing results for **{TICKER_SPELLING[word]}** (corrected from '{word}').*\n\n"
+    return ""
 
 
 def detect_ticker(query: str):
+    """Returns first detected ticker, or None."""
     t = detect_tickers(query)
     return t[0] if t else None
 
@@ -322,19 +365,15 @@ def detect_switch_query(query: str) -> dict | None:
 
             # Determine which is source and which is target based on pattern
             if "to" in pattern and "from" in pattern[:pattern.index("to")]:
-                # "from A to B" — g1=source, g2=target
                 source_ticker = _resolve(g1)
                 target_ticker = _resolve(g2)
             elif "move" in pattern and "to" in pattern and "from" in pattern[pattern.index("to"):]:
-                # "move to B from A" — g1=target, g2=source
                 target_ticker = _resolve(g1)
                 source_ticker = _resolve(g2)
             elif "sell" in pattern:
-                # "sell A and buy B" — g1=source, g2=target
                 source_ticker = _resolve(g1)
                 target_ticker = _resolve(g2)
             else:
-                # Default: try both
                 t1 = _resolve(g1)
                 t2 = _resolve(g2)
                 if t1 and t2:
@@ -404,7 +443,7 @@ def detect_investment_query(query: str) -> dict | None:
     if not tickers:
         return None
 
-    # Period
+    # Period — default 1 year for regular investment
     period_days, period_label = 365, "1 year"
     for pattern, mult, unit in [
         (r'(\d+)\s*year', 365, "year"), (r'(\d+)\s*month', 30, "month"),
@@ -418,13 +457,13 @@ def detect_investment_query(query: str) -> dict | None:
             break
 
     return {
-        "amount":      amount,
-        "tickers":     tickers,
-        "per_ticker":  amount / len(tickers),
-        "period_days": period_days,
+        "amount":       amount,
+        "tickers":      tickers,
+        "per_ticker":   amount / len(tickers),
+        "period_days":  period_days,
         "period_label": period_label,
-        "is_switch":   False,
-        "source":      None,
+        "is_switch":    False,
+        "source":       None,
     }
 
 
@@ -474,6 +513,7 @@ def _safe(info, key, default="N/A"):
     val = info.get(key)
     return default if (val is None or val == "" or val == 0) else val
 
+
 def _fmt(val):
     try:
         val = float(val)
@@ -481,11 +521,142 @@ def _fmt(val):
         if val >= 1e9:  return f"${val/1e9:.2f}B"
         if val >= 1e6:  return f"${val/1e6:.2f}M"
         return f"${val:,.2f}"
-    except: return str(val)
+    except:
+        return str(val)
+
 
 def _pct(val):
     try:    return f"{float(val)*100:.2f}%"
     except: return "N/A"
+
+
+def _pe(info) -> str:
+    """Safely format P/E ratio to 2 decimals — avoids crash when value is N/A."""
+    try:
+        val = info.get("trailingPE")
+        if val is None or val == "" or val == 0:
+            return "N/A"
+        return f"{float(val):.2f}"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def _dy(info) -> str:
+    """Dividend yield as a percent string. Computed from rate/price so it
+    doesn't depend on yfinance's unit convention for dividendYield."""
+    try:
+        price = info.get("currentPrice") or info.get("regularMarketPrice")
+        rate = info.get("dividendRate")
+
+        if rate is not None and price:
+            pct = float(rate) / float(price) * 100
+        else:
+            val = info.get("dividendYield")
+            if val in (None, ""):
+                return "N/A"
+            pct = float(val)  # this yfinance version returns percent already
+
+        if pct < 0 or pct > 25:   # sanity guard against bad data
+            return "N/A"
+        return f"{pct:.2f}%"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def _usd(v, escape: bool = False) -> str:
+    """$1,234.50 with 2 decimals, or N/A. escape=True writes \\$ so that two prices on one line
+    (a range) are not read as a LaTeX formula by Streamlit's markdown."""
+    try:
+        s = f"${float(v):,.2f}"
+    except (TypeError, ValueError):
+        return "N/A"
+    return s.replace("$", "\\$") if escape else s
+
+
+def _range_position(info: dict) -> str:
+    """Where the price sits between the 52-week low (0%) and high (100%)."""
+    try:
+        price = float(info.get("currentPrice") or info.get("regularMarketPrice"))
+        lo = float(info.get("fiftyTwoWeekLow"))
+        hi = float(info.get("fiftyTwoWeekHigh"))
+        return f"{(price - lo) / (hi - lo) * 100:.0f}% of the way from low to high"
+    except (TypeError, ValueError, ZeroDivisionError):
+        return "N/A"
+
+
+def _money(v) -> str:
+    try:
+        return f"${float(v):,.2f}"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def _num(v, digits: int = 2) -> str:
+    try:
+        return f"{float(v):,.{digits}f}"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def _pct_field(info: dict, key: str) -> str:
+    """yfinance returns margins / ROE / payout as fractions (0.1744 means 17.44%)."""
+    try:
+        return f"{float(info.get(key)) * 100:.2f}%"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def _count(n) -> str:
+    """Plain count (shares, employees) with K/M/B/T suffix and NO dollar sign."""
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return "N/A"
+    for div, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(n) >= div:
+            return f"{n / div:.2f}{suffix}"
+    return f"{n:,.0f}"
+
+
+def _shares_text(info: dict) -> str:
+    """yfinance's sharesOutstanding can cover one share class only (e.g. GOOGL).
+    If it disagrees with marketCap / price by >5%, show the implied figure instead."""
+    so = info.get("sharesOutstanding")
+    cap = info.get("marketCap")
+    px = info.get("currentPrice") or info.get("regularMarketPrice")
+    implied = (cap / px) if cap and px else None
+    if implied and (not so or abs(so / implied - 1) > 0.05):
+        return f"{_count(implied)} (implied: market cap ÷ price)"
+    return _count(so)
+
+
+_TYPO_MAP = {
+    "yeild": "yield", "yeid": "yield", "yld": "yield",
+    "divident": "dividend", "divedend": "dividend", "dividned": "dividend",
+    "revnue": "revenue", "revenu": "revenue",
+    "earnigns": "earnings", "ernings": "earnings",
+}
+
+
+_LONG_VOCAB = [
+    "dividend", "dividends", "revenue", "earnings", "financials", "capitalization",
+    "valuation", "performance", "headquarters", "management", "executive", "leadership",
+]
+
+
+def _fix_typos(q: str) -> str:
+    """Fix typos in intent words only. Short words use the explicit map (fuzzy matching on
+    5-letter words causes false hits like field->yield); long words use difflib at 0.8."""
+    fixed = []
+    for w in q.split():
+        if w in _TYPO_MAP:
+            fixed.append(_TYPO_MAP[w])
+        elif len(w) >= 7 and w not in _LONG_VOCAB:
+            m = get_close_matches(w, _LONG_VOCAB, n=1, cutoff=0.8)
+            fixed.append(m[0] if m else w)
+        else:
+            fixed.append(w)
+    return " ".join(fixed)
 
 
 # =========================================
@@ -502,23 +673,23 @@ def _stock_info_block(ticker: str) -> str:
     sym   = _safe(info, "symbol",   ticker)
     price = _safe(info, "currentPrice", _safe(info, "regularMarketPrice"))
     prev  = _safe(info, "previousClose")
-    dy    = info.get("dividendYield")
 
     try:
         chg   = float(price) - float(prev)
         pct   = (chg / float(prev)) * 100
         chg_s = f"{'🟢' if chg >= 0 else '🔴'} {chg:+.2f} ({pct:+.2f}%)"
-    except: chg_s = "N/A"
+    except (TypeError, ValueError, ZeroDivisionError):
+        chg_s = "N/A"
 
     weekly_block = ""
     if weekly:
-        wk_chg   = weekly["week_close"] - weekly["week_open"]
+        wk_chg = weekly["week_close"] - weekly["week_open"]
         weekly_block = (
             f"\n**📅 Weekly OHLC (Last 5 Trading Days)**\n"
-            f"- Weekly Open  : ${weekly['week_open']}\n"
-            f"- Weekly High  : **${weekly['week_high']}**\n"
-            f"- Weekly Low   : **${weekly['week_low']}**\n"
-            f"- Weekly Close : ${weekly['week_close']}\n"
+            f"- Weekly Open  : {_usd(weekly['week_open'])}\n"
+            f"- Weekly High  : **{_usd(weekly['week_high'])}**\n"
+            f"- Weekly Low   : **{_usd(weekly['week_low'])}**\n"
+            f"- Weekly Close : {_usd(weekly['week_close'])}\n"
             f"- Weekly Chg   : {'🟢' if wk_chg >= 0 else '🔴'} ${wk_chg:+.2f}\n"
             f"- Weekly Vol   : {weekly['volume']:,}\n"
         )
@@ -527,21 +698,22 @@ def _stock_info_block(ticker: str) -> str:
         f"\n\n---\n\n"
         f"**📊 {name} ({sym}) — Live Stock Data**\n\n"
         f"**💰 Price**\n"
-        f"- Current Price : **${price}**\n"
+        f"- Current Price : **{_usd(price)}**\n"
         f"- Change Today  : {chg_s}\n"
-        f"- Prev Close    : ${prev}\n"
-        f"- Open          : ${_safe(info,'open')}\n"
-        f"- Day Range     : ${_safe(info,'dayLow')} – ${_safe(info,'dayHigh')}\n"
+        f"- Prev Close    : {_usd(prev)}\n"
+        f"- Open          : {_usd(info.get('open'))}\n"
+        f"- Day Range     : {_usd(info.get('dayLow'), True)} - {_usd(info.get('dayHigh'), True)}\n"
         f"{weekly_block}\n"
         f"**📈 Fundamentals**\n"
         f"- Market Cap    : {_fmt(_safe(info,'marketCap'))}\n"
-        f"- P/E (TTM)     : {_safe(info,'trailingPE')}\n"
-        f"- Div Yield     : {_pct(dy) if dy else 'N/A'}\n"
-        f"- 52W Range     : ${_safe(info,'fiftyTwoWeekLow')} – ${_safe(info,'fiftyTwoWeekHigh')}\n"
+        f"- P/E (TTM)     : {_pe(info)}\n"
+        f"- Div Yield     : {_dy(info)}\n"
+        f"- 52W Range     : {_usd(info.get('fiftyTwoWeekLow'), True)} - {_usd(info.get('fiftyTwoWeekHigh'), True)}\n"
+        f"- 52W Position  : {_range_position(info)}\n"
         f"- Revenue (TTM) : {_fmt(_safe(info,'totalRevenue'))}\n"
-        f"- EPS (TTM)     : ${_safe(info,'trailingEps')}\n"
+        f"- EPS (TTM)     : {_usd(info.get('trailingEps'))}\n"
         f"- Sector        : {_safe(info,'sector')} | {_safe(info,'industry')}\n"
-        f"- Employees     : {int(_safe(info,'fullTimeEmployees',0)):,}"
+        f"- Employees     : {_num(info.get('fullTimeEmployees'), 0)}"
     )
 
 
@@ -550,28 +722,45 @@ def _stock_info_block(ticker: str) -> str:
 # =========================================
 
 def calculate_investment_return(amount: float, ticker: str, period_days: int) -> dict:
+    """Return of `amount` invested `period_days` ago.
+    - current price = the same live quote the rest of the app shows (one source of truth)
+    - buy price     = close on the first trading day on/after (today - period_days)
+    """
     try:
+        info = get_ticker_info(ticker)
+        live = None
+        if "error" not in info:
+            live = info.get("currentPrice") or info.get("regularMarketPrice")
+        try:
+            live = float(live) if live else None
+        except (TypeError, ValueError):
+            live = None
+
         if period_days == 0:
-            info = get_ticker_info(ticker)
-            cp   = _safe(info, "currentPrice", _safe(info, "regularMarketPrice", 0))
-            cp   = float(cp) if cp != "N/A" else 0
-            if cp <= 0:
+            if not live or live <= 0:
                 return {"error": f"Cannot get price for {ticker}"}
-            sh = amount / cp
+            sh = amount / live
             return {
-                "ticker": ticker, "buy_price": cp, "current_price": cp,
+                "ticker": ticker, "buy_price": live, "current_price": live,
                 "shares": sh, "invested": amount, "current_value": amount,
-                "profit": 0, "pct_return": 0, "is_current": True,
+                "profit": 0, "pct_return": 0, "is_current": True, "buy_date": None,
             }
 
-        end   = datetime.today()
-        start = end - timedelta(days=period_days + 5)
-        hist  = yf.Ticker(ticker).history(
+        today  = datetime.today()
+        target = today - timedelta(days=period_days)
+        start  = target - timedelta(days=7)          # a week of slack for weekends / holidays
+        end    = today + timedelta(days=1)           # yfinance 'end' is exclusive: +1 keeps today's bar
+        hist   = yf.Ticker(ticker).history(
             start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"))
         if hist.empty:
             return {"error": f"No historical data for {ticker}"}
-        bp  = float(hist["Close"].iloc[0])
-        cp  = float(hist["Close"].iloc[-1])
+
+        dates = hist.index.tz_localize(None) if getattr(hist.index, "tz", None) is not None else hist.index
+        on_or_after = dates >= pd.Timestamp(target.date())
+        pos = int(on_or_after.argmax()) if on_or_after.any() else 0
+
+        bp  = float(hist["Close"].iloc[pos])
+        cp  = live if live else float(hist["Close"].iloc[-1])
         sh  = amount / bp
         cv  = sh * cp
         pnl = cv - amount
@@ -580,6 +769,7 @@ def calculate_investment_return(amount: float, ticker: str, period_days: int) ->
             "ticker": ticker, "buy_price": bp, "current_price": cp,
             "shares": sh, "invested": amount, "current_value": cv,
             "profit": pnl, "pct_return": pct, "is_current": False,
+            "buy_date": dates[pos].strftime("%Y-%m-%d"),
         }
     except Exception as e:
         return {"error": str(e)}
@@ -589,12 +779,17 @@ def calculate_investment_return(amount: float, ticker: str, period_days: int) ->
 # BUILD INVESTMENT ANSWER
 # =========================================
 
+def _on(r: dict) -> str:
+    """' (on 2025-10-27)' when the buy date is known."""
+    return f" (on {r['buy_date']})" if r.get("buy_date") else ""
+
+
 def build_investment_answer(inv: dict) -> str:
-    amount       = inv["amount"]
-    period_days  = inv.get("period_days", 365)
+    amount = inv["amount"]
+    period_days = inv.get("period_days", 365)
     period_label = inv.get("period_label", "1 year")
-    is_switch    = inv.get("is_switch", False)
-    source       = inv.get("source")
+    is_switch = inv.get("is_switch", False)
+    source = inv.get("source")
 
     # ── SWITCH ──
     if is_switch and "target" in inv:
@@ -602,6 +797,7 @@ def build_investment_answer(inv: dict) -> str:
 
         src_info = get_ticker_info(source) if source else {}
         src_name = src_info.get("longName", source) if source and "error" not in src_info else (source or "your holding")
+        src_text = f"{src_name} ({source})" if source and src_name != source else src_name
 
         tgt_info = get_ticker_info(target)
         tgt_name = tgt_info.get("longName", target) if "error" not in tgt_info else target
@@ -610,34 +806,55 @@ def build_investment_answer(inv: dict) -> str:
         if "error" in r:
             return f"⚠️ Could not calculate for {target}: {r['error']}"
 
+        # FIX: the "from" side now goes through the SAME calculator as the "to" side,
+        # so both legs use the same price source.
+        s = calculate_investment_return(amount, source, period_days) if source else None
+        s_ok = bool(s) and "error" not in s
+
         if period_days == 0:
-            return (
-                f"**🔄 Investment Switch — Current Analysis**\n\n"
-                f"- Amount         : **${amount:,.2f}**\n"
-                f"- From           : {src_name}\n"
-                f"- To             : **{tgt_name} ({target})**\n\n"
-                f"**If you switch right now:**\n"
-                f"- {target} Current Price : ${r['current_price']:.2f}\n"
-                f"- Shares you get        : **{r['shares']:.4f}**\n"
-                f"- Total value           : **${r['current_value']:,.2f}**\n"
-            )
-        else:
-            arrow = "🟢" if r["profit"] >= 0 else "🔴"
-            return (
-                f"**🔄 Investment Switch — {period_label} ago**\n\n"
-                f"- Amount switched : **${amount:,.2f}** (full amount, no split)\n"
-                f"- From            : {src_name}\n"
-                f"- To              : **{tgt_name} ({target})**\n\n"
-                f"**Historical Result (if switched {period_label} ago):**\n"
-                f"- Buy Price at entry : ${r['buy_price']:.2f}\n"
-                f"- Shares purchased   : {r['shares']:.4f}\n"
-                f"- Current Price      : ${r['current_price']:.2f}\n"
-                f"- Current Value      : **${r['current_value']:,.2f}**\n"
-                f"- Profit / Loss      : {arrow} ${r['profit']:+,.2f} ({r['pct_return']:+.2f}%)\n"
-            )
+            lines = [
+                "**🔄 Investment Switch — Current Analysis**\n",
+                f"- Amount : **${amount:,.2f}**",
+                f"- From   : {src_text}",
+                f"- To     : **{tgt_name} ({target})**\n",
+                "**If you switch right now:**",
+            ]
+            if s_ok:
+                lines.append(f"- Sell {source} : {s['shares']:.4f} shares @ ${s['current_price']:.2f}")
+            lines += [
+                f"- Buy {target}  : {r['shares']:.4f} shares @ ${r['current_price']:.2f}",
+                f"- Value moved  : **${r['current_value']:,.2f}**",
+            ]
+            return "\n".join(lines)
+
+        arrow = "🟢" if r["profit"] >= 0 else "🔴"
+        lines = [
+            f"**🔄 Investment Switch — {period_label} ago**\n",
+            f"- Amount switched : **${amount:,.2f}** (full amount, no split)",
+            f"- From            : {src_text}",
+            f"- To              : **{tgt_name} ({target})**\n",
+            f"**If you had switched {period_label} ago:**",
+            f"- {target} buy price{_on(r)} : ${r['buy_price']:.2f}",
+            f"- Shares purchased   : {r['shares']:.4f}",
+            f"- Current Price      : ${r['current_price']:.2f}",
+            f"- Current Value      : **${r['current_value']:,.2f}**",
+            f"- Profit / Loss      : {arrow} ${r['profit']:+,.2f} ({r['pct_return']:+.2f}%)",
+        ]
+        if s_ok:
+            s_arrow = "🟢" if s["profit"] >= 0 else "🔴"
+            lines += [
+                "",
+                f"**If you had stayed in {source}:**",
+                f"- Current Value : **${s['current_value']:,.2f}**",
+                f"- Profit / Loss : {s_arrow} ${s['profit']:+,.2f} ({s['pct_return']:+.2f}%)",
+                "",
+                f"**Switch vs stay : ${r['current_value'] - s['current_value']:+,.2f}**",
+            ]
+        lines += ["", "*Price return only — dividends are not included.*"]
+        return "\n".join(lines)
 
     # ── REGULAR INVESTMENT ──
-    tickers    = inv["tickers"]
+    tickers = inv["tickers"]
     per_ticker = inv.get("per_ticker", amount / len(tickers))
 
     if len(tickers) == 1:
@@ -664,7 +881,7 @@ def build_investment_answer(inv: dict) -> str:
         arrow = "🟢" if r["profit"] >= 0 else "🔴"
         lines.extend([
             f"**{t}**",
-            f"  - Buy Price     : ${r['buy_price']:.2f}",
+            f"  - Buy Price{_on(r)} : ${r['buy_price']:.2f}",
             f"  - Current Price : ${r['current_price']:.2f}",
             f"  - Shares Bought : {r['shares']:.4f}",
             f"  - Current Value : **${r['current_value']:,.2f}**",
@@ -675,7 +892,7 @@ def build_investment_answer(inv: dict) -> str:
         ti += per_ticker
 
     if len(tickers) > 1:
-        tp  = tc - ti
+        tp = tc - ti
         tpc = (tp / ti) * 100
         lines.extend([
             "---", "**Portfolio Total**",
@@ -684,6 +901,7 @@ def build_investment_answer(inv: dict) -> str:
             f"  - Total P&L      : {'🟢' if tp >= 0 else '🔴'} ${tp:+,.2f} ({tpc:+.2f}%)",
         ])
 
+    lines.append("\n*Price return only — dividends are not included.*")
     return "\n".join(lines)
 
 
@@ -692,109 +910,115 @@ def build_investment_answer(inv: dict) -> str:
 # =========================================
 
 def build_ticker_answer(ticker: str, query: str) -> str:
-    q    = query.strip().lower()
+    q = _fix_typos(query.strip().lower())      # FIX: "divident yeild" now reaches the dividend block
     info = get_ticker_info(ticker)
     if "error" in info:
         return f"Could not fetch data for **{ticker}**: {info['error']}"
 
     name = _safe(info, "longName", ticker)
-    sym  = _safe(info, "symbol",   ticker)
+    sym = _safe(info, "symbol", ticker)
     specific = ""
 
-    if any(w in q for w in ["ceo", "leader", "leading", "head", "chief", "founder",
-                             "who runs", "management", "officer", "executive"]):
+    # ── CEO / Leadership ──   ("head" -> "head of": "headquarters" used to land here)
+    if any(w in q for w in ["ceo", "leader", "leading", "head of", "chief", "founder",
+                            "who runs", "management", "officer", "executive"]):
         officers = info.get("companyOfficers", [])
-        ceo      = next((o for o in officers if "CEO" in o.get("title","").upper()), None)
-        ceo_name = ceo.get("name","N/A") if ceo else "N/A"
-        ceo_pay  = _fmt(ceo.get("totalPay",0)) if ceo else "N/A"
-        top      = "\n".join([f"  - {o.get('name','N/A')} — {o.get('title','N/A')}" for o in officers[:5]])
+        ceo = next((o for o in officers if "CEO" in o.get("title", "").upper()), None)
+        ceo_name = ceo.get("name", "N/A") if ceo else "N/A"
+        pay = ceo.get("totalPay") if ceo else None
+        ceo_pay = _fmt(pay) if pay else "N/A"             # missing pay is not $0.00
+        emp = info.get("fullTimeEmployees")
+        emp_str = f"{int(emp):,}" if emp else "N/A"
+        top = "\n".join([f"  - {o.get('name', 'N/A')} — {o.get('title', 'N/A')}" for o in officers[:5]])
         specific = (
             f"**{name} ({sym}) — Leadership**\n\n"
             f"- CEO           : **{ceo_name}**\n"
             f"- CEO Total Pay : {ceo_pay}\n\n"
             f"**Top Executives:**\n{top}\n\n"
-            f"- Employees     : {int(_safe(info,'fullTimeEmployees',0)):,}"
+            f"- Employees     : {emp_str}"
         )
+
+    # ── Business Description ──
     elif any(w in q for w in ["what does", "business", "description", "about", "makes", "products", "services"]):
-        desc     = _safe(info, "longBusinessSummary", "")
-        # Crypto fallback descriptions
-        CRYPTO_DESCRIPTIONS = {
-        "BTC-USD":  "Bitcoin (BTC) is the world's first and largest cryptocurrency by market cap. It is a decentralized digital currency that operates without a central bank, using blockchain technology for peer-to-peer transactions.",
-        "ETH-USD":  "Ethereum (ETH) is a decentralized blockchain platform that enables smart contracts and decentralized applications (dApps). It is the second largest cryptocurrency by market cap.",
-        "DOGE-USD": "Dogecoin (DOGE) started as a meme cryptocurrency in 2013 but gained massive popularity, largely driven by social media and endorsements from Elon Musk. It uses a Proof-of-Work consensus and is widely used for tipping and micro-transactions.",
-        "SOL-USD":  "Solana (SOL) is a high-performance blockchain supporting smart contracts and DeFi applications, known for extremely fast transaction speeds and low fees.",
-        "BNB-USD":  "Binance Coin (BNB) is the native cryptocurrency of the Binance exchange ecosystem, used for trading fee discounts, token sales, and powering the BNB Smart Chain.",
-        "XRP-USD":  "XRP is the native token of the Ripple network, designed for fast, low-cost international money transfers between financial institutions.",
-        "ADA-USD":  "Cardano (ADA) is a proof-of-stake blockchain platform built with a research-driven approach, focused on security, scalability, and sustainability.",
-        "DOGE-USD": "Dogecoin (DOGE) is a meme-inspired cryptocurrency that became a cultural phenomenon. Elon Musk has repeatedly endorsed it on social media, calling it 'the people's crypto'.",
-        "LTC-USD":  "Litecoin (LTC) is one of the earliest altcoins, designed as a faster and lighter version of Bitcoin with lower transaction fees.",
-        "AVAX-USD": "Avalanche (AVAX) is a smart contract platform competing with Ethereum, known for fast finality and a unique consensus mechanism.",
-        }
-    
+        desc = _safe(info, "longBusinessSummary", "")
         if not desc:
-            sym  = _safe(info, "symbol", ticker)
-            desc = CRYPTO_DESCRIPTIONS.get(sym, f"{sym} is a cryptocurrency traded on major exchanges. Detailed business description not available from data provider.")
-    
+            desc = CRYPTO_DESCRIPTIONS.get(sym, f"{sym} is a cryptocurrency traded on major exchanges.")
         specific = f"**{name} ({sym}) — Business Overview**\n\n{desc}"
+
+    # ── Market Cap ──
     elif any(w in q for w in ["market cap", "capitalization", "worth", "valuation"]):
         specific = (
             f"**{name} ({sym}) — Market Cap**\n\n"
-            f"- Market Cap         : **{_fmt(_safe(info,'marketCap'))}**\n"
-            f"- Enterprise Value   : {_fmt(_safe(info,'enterpriseValue'))}\n"
-            f"- Shares Outstanding : {_fmt(_safe(info,'sharesOutstanding'))}"
+            f"- Market Cap         : **{_fmt(_safe(info, 'marketCap'))}**\n"
+            f"- Enterprise Value   : {_fmt(_safe(info, 'enterpriseValue'))}\n"
+            f"- Shares Outstanding : {_shares_text(info)}"      # FIX: was formatted as dollars
         )
+
+    # ── P/E Ratio ──
     elif any(w in q for w in ["p/e", "pe ratio", "price to earnings"]):
         specific = (
             f"**{name} ({sym}) — Valuation Ratios**\n\n"
-            f"- Trailing P/E : **{_safe(info,'trailingPE')}**\n"
-            f"- Forward P/E  : {_safe(info,'forwardPE')}\n"
-            f"- PEG Ratio    : {_safe(info,'pegRatio')}\n"
-            f"- Price/Sales  : {_safe(info,'priceToSalesTrailing12Months')}\n"
-            f"- Price/Book   : {_safe(info,'priceToBook')}"
+            f"- Trailing P/E : **{_pe(info)}**\n"
+            f"- Forward P/E  : {_num(info.get('forwardPE'))}\n"
+            f"- PEG Ratio    : {_num(info.get('pegRatio'))}\n"
+            f"- Price/Sales  : {_num(info.get('priceToSalesTrailing12Months'))}\n"
+            f"- Price/Book   : {_num(info.get('priceToBook'))}"
         )
+
+    # ── Dividend ──
     elif any(w in q for w in ["dividend", "yield", "payout"]):
-        dy       = info.get("dividendYield")
+        dy_str = _dy(info)
+        rate = info.get("dividendRate")
         specific = (
             f"**{name} ({sym}) — Dividends**\n\n"
-            f"- Dividend Yield : **{_pct(dy) if dy else 'N/A'}**\n"
-            f"- Annual Rate    : ${_safe(info,'dividendRate')}\n"
-            f"- Payout Ratio   : {_safe(info,'payoutRatio')}"
+            f"- Dividend Yield : **{dy_str}**\n"
+            f"- Annual Rate    : {_money(rate) if rate else 'N/A'}\n"   # FIX: was "$N/A"
+            f"- Payout Ratio   : {_pct_field(info, 'payoutRatio')}"
         )
+
+    # ── 52-Week Range ──
     elif any(w in q for w in ["52 week", "52-week", "range", "performance", "year high", "year low"]):
-        price = _safe(info, "currentPrice", _safe(info, "regularMarketPrice"))
-        hi    = _safe(info, "fiftyTwoWeekHigh")
-        lo    = _safe(info, "fiftyTwoWeekLow")
+        price = info.get("currentPrice") or info.get("regularMarketPrice")
+        hi = info.get("fiftyTwoWeekHigh")
+        lo = info.get("fiftyTwoWeekLow")
         try:
-            fl   = ((float(price)-float(lo))/float(lo))*100
-            fh   = ((float(price)-float(hi))/float(hi))*100
-            perf = f"- From 52W Low  : +{fl:.1f}%\n- From 52W High : {fh:.1f}%"
-        except: perf = ""
+            fl = (float(price) - float(lo)) / float(lo) * 100
+            fh = (float(price) - float(hi)) / float(hi) * 100
+            perf = f"- From 52W Low  : {fl:+.1f}%\n- From 52W High : {fh:+.1f}%\n"
+        except (TypeError, ValueError, ZeroDivisionError):
+            perf = ""
         specific = (
             f"**{name} ({sym}) — 52-Week Performance**\n\n"
-            f"- 52W High      : **${hi}**\n- 52W Low       : **${lo}**\n"
-            f"- Current Price : ${price}\n{perf}\n"
-            f"- 50-Day MA     : ${_safe(info,'fiftyDayAverage')}\n"
-            f"- 200-Day MA    : ${_safe(info,'twoHundredDayAverage')}"
+            f"- 52W High      : **{_money(hi)}**\n"
+            f"- 52W Low       : **{_money(lo)}**\n"
+            f"- Current Price : {_money(price)}\n"
+            f"{perf}"
+            f"- 50-Day MA     : {_money(info.get('fiftyDayAverage'))}\n"     # FIX: 2 decimals
+            f"- 200-Day MA    : {_money(info.get('twoHundredDayAverage'))}"
         )
+
+    # ── Financials ──
     elif any(w in q for w in ["financial", "revenue", "profit", "earnings", "ebitda", "income", "margin"]):
         specific = (
             f"**{name} ({sym}) — Key Financials**\n\n"
-            f"- Revenue (TTM) : **{_fmt(_safe(info,'totalRevenue'))}**\n"
-            f"- Gross Profit  : {_fmt(_safe(info,'grossProfits'))}\n"
-            f"- EBITDA        : {_fmt(_safe(info,'ebitda'))}\n"
-            f"- Net Income    : {_fmt(_safe(info,'netIncomeToCommon'))}\n"
-            f"- EPS (TTM)     : ${_safe(info,'trailingEps')}\n"
-            f"- Profit Margin : {_safe(info,'profitMargins')}\n"
-            f"- ROE           : {_safe(info,'returnOnEquity')}"
+            f"- Revenue (TTM) : **{_fmt(_safe(info, 'totalRevenue'))}**\n"
+            f"- Gross Profit  : {_fmt(_safe(info, 'grossProfits'))}\n"
+            f"- EBITDA        : {_fmt(_safe(info, 'ebitda'))}\n"
+            f"- Net Income    : {_fmt(_safe(info, 'netIncomeToCommon'))}\n"
+            f"- EPS (TTM)     : {_money(info.get('trailingEps'))}\n"
+            f"- Profit Margin : {_pct_field(info, 'profitMargins')}\n"          # FIX: 0.1744 -> 17.44%
+            f"- ROE           : {_pct_field(info, 'returnOnEquity')}"           # FIX: 0.3056 -> 30.56%
         )
+
+    # ── Sector / Corporate Info ──
     elif any(w in q for w in ["sector", "industry", "country", "where", "based", "headquarters"]):
         specific = (
             f"**{name} ({sym}) — Corporate Info**\n\n"
-            f"- Sector   : **{_safe(info,'sector')}**\n"
-            f"- Industry : {_safe(info,'industry')}\n"
-            f"- Country  : {_safe(info,'country')}\n"
-            f"- City     : {_safe(info,'city')}\n"
-            f"- Website  : {_safe(info,'website')}"
+            f"- Sector   : **{_safe(info, 'sector')}**\n"
+            f"- Industry : {_safe(info, 'industry')}\n"
+            f"- Country  : {_safe(info, 'country')}\n"
+            f"- City     : {_safe(info, 'city')}\n"
+            f"- Website  : {_safe(info, 'website')}"
         )
 
     stock_block = _stock_info_block(sym)

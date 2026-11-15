@@ -11,8 +11,12 @@ import numpy as np
 import pandas as pd
 import math
 import re
+import inspect
+import logging
 from scipy import stats
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 
 # =========================================
@@ -134,37 +138,36 @@ def calculate_monte_carlo_var(
     if returns is None or len(returns) < 20:
         return {"error": f"Insufficient data for {ticker}"}
 
-    mu    = returns.mean()
+    mu = returns.mean()
     sigma = returns.std()
 
-    np.random.seed(42)
-    rand_returns     = np.random.normal(mu, sigma, (simulations, days))
-    cum_returns      = np.exp(np.cumsum(rand_returns, axis=1))
-    final_multipliers = cum_returns[:, -1]
-    final_values     = investment * final_multipliers
-    losses           = investment - final_values
-    pos_losses       = losses[losses > 0]
+    rng = np.random.default_rng(42)                      # reproducible, no global seed
+    daily = rng.normal(mu, sigma, (simulations, days))
+    final_multipliers = np.exp(daily.sum(axis=1))        # value multiple after `days` days
+    losses = investment * (1 - final_multipliers)        # positive number = money lost
 
-    var_pct   = 1 - confidence
-    var_value = np.percentile(losses, var_pct * 100)
-    var_pct_  = (var_value / investment) * 100
-    cvar_val  = pos_losses[pos_losses >= var_value].mean() if len(pos_losses[pos_losses >= var_value]) > 0 else var_value
+    # VaR: the loss that is exceeded only (1 - confidence) of the time
+    # -> the 95th percentile of LOSSES (not the 5th, which is the best outcome).
+    var_value = np.percentile(losses, confidence * 100)
+    # CVaR: the average loss in that worst tail, so it is always >= VaR.
+    cvar_value = losses[losses >= var_value].mean()
 
     return {
-        "calc_type":        "var",
-        "ticker":           ticker,
-        "investment":       investment,
-        "days":             days,
-        "confidence":       confidence,
-        "confidence_pct":   int(confidence * 100),
-        "mu_daily":         round(mu, 6),
-        "sigma_daily":      round(sigma, 6),
-        "volatility_annual": round(sigma * np.sqrt(252) * 100, 2),
-        "var_amount":       round(var_value, 2),
-        "var_percent":      round(var_pct_, 2),
-        "cvar_amount":      round(cvar_val, 2),
-        "cvar_percent":     round((cvar_val / investment) * 100, 2),
-        "simulations":      simulations,
+        "calc_type":         "var",
+        "ticker":            ticker,
+        "investment":        investment,
+        "days":              days,
+        "confidence":        confidence,
+        "confidence_pct":    int(round(confidence * 100)),
+        "tail_pct":          int(round((1 - confidence) * 100)),
+        "mu_daily":          round(float(mu), 6),
+        "sigma_daily":       round(float(sigma), 6),
+        "volatility_annual": round(float(sigma * np.sqrt(252) * 100), 2),
+        "var_amount":        round(float(var_value), 2),
+        "var_percent":       round(float(var_value / investment * 100), 2),
+        "cvar_amount":       round(float(cvar_value), 2),
+        "cvar_percent":      round(float(cvar_value / investment * 100), 2),
+        "simulations":       simulations,
     }
 
 
@@ -468,37 +471,13 @@ def format_calculation_result(result: dict) -> str:
         )
 
     if ct == "volatility":
-        return (
-            f"**📊 Volatility — {result['ticker']} ({result['period']})**\n\n"
-            f"- Daily Volatility  : **{result['daily_volatility']}%**\n"
-            f"- Annual Volatility : **{result['annual_volatility']}%**"
-        )
+        return _fmt_volatility(result)
 
     if ct == "var":
-        return (
-            f"**🎲 Monte Carlo VaR — {result['ticker']}**\n\n"
-            f"**Parameters:**\n"
-            f"- Investment   : ${result['investment']:,.2f}\n"
-            f"- Horizon      : {result['days']} days\n"
-            f"- Confidence   : {result['confidence_pct']}%\n"
-            f"- Simulations  : {result['simulations']:,}\n\n"
-            f"**Results:**\n"
-            f"- Annual Vol   : {result['volatility_annual']}%\n"
-            f"- **VaR**      : ${result['var_amount']:,.2f} ({result['var_percent']}%)\n"
-            f"- **CVaR**     : ${result['cvar_amount']:,.2f} ({result['cvar_percent']}%)\n\n"
-            f"*At {result['confidence_pct']}% confidence, max expected loss over "
-            f"{result['days']} days is **${result['var_amount']:,.2f}***"
-        )
+        return _fmt_var(result)
 
     if ct == "sharpe":
-        return (
-            f"**📈 Sharpe Ratio — {result['ticker']} ({result['period']})**\n\n"
-            f"- Sharpe Ratio  : **{result['sharpe_ratio']}**\n"
-            f"- Rating        : {result['rating']}\n"
-            f"- Annual Return : {result['annual_return']}%\n"
-            f"- Volatility    : {result['volatility']}%\n"
-            f"- Risk-Free Rate: {result['risk_free_rate']*100}%"
-        )
+        return _fmt_sharpe(result)
 
     if ct == "sortino":
         return (
@@ -576,6 +555,57 @@ def format_calculation_result(result: dict) -> str:
     return str(result)
 
 
+def _parse_amount(q: str, default: float = 10000) -> float:
+    """Dollar amount from a query. Trusts only '$5000', '5k' / '2m' / '1b', or a bare
+    number of 4+ digits, so '5 months' or '10 days' are never read as money."""
+    m = (re.search(r'\$\s*(\d[\d,]*(?:\.\d+)?)\s*(k|m|b)?(?![a-z])', q)
+         or re.search(r'\b(\d[\d,]*(?:\.\d+)?)\s*(k|m|b)(?![a-z])', q)
+         or re.search(r'\b(\d[\d,]{3,})\b(?!\s*(?:day|week|month|year|%))', q))
+    if not m:
+        return default
+    value = float(m.group(1).replace(",", ""))
+    suffix = (m.group(2) if m.re.groups >= 2 else None) or ""
+    return value * {"k": 1e3, "m": 1e6, "b": 1e9}.get(suffix, 1)
+
+
+def _fmt_volatility(result: dict) -> str:
+    return (
+        f"**📊 Volatility — {result['ticker']} ({result['period']})**\n\n"
+        f"- Daily Volatility  : **{float(result['daily_volatility']):.2f}%**\n"
+        f"- Annual Volatility : **{float(result['annual_volatility']):.2f}%**"
+    )
+
+
+def _fmt_var(result: dict) -> str:
+    tail = result["tail_pct"]
+    return (
+        f"**🎲 Monte Carlo VaR — {result['ticker']}**\n\n"
+        f"**Parameters:**\n"
+        f"- Investment   : ${result['investment']:,.2f}\n"
+        f"- Horizon      : {result['days']} days\n"
+        f"- Confidence   : {result['confidence_pct']}%\n"
+        f"- Simulations  : {result['simulations']:,}\n\n"
+        f"**Results:**\n"
+        f"- Annual Vol   : {result['volatility_annual']}%\n"
+        f"- **VaR**      : ${result['var_amount']:,.2f} ({result['var_percent']}%)\n"
+        f"- **CVaR**     : ${result['cvar_amount']:,.2f} ({result['cvar_percent']}%)\n\n"
+        f"*There is a {tail}% chance of losing more than **\\${result['var_amount']:,.2f}** "
+        f"over {result['days']} days. In those worst {tail}% of cases, the average loss "
+        f"(CVaR) is **\\${result['cvar_amount']:,.2f}**.*"
+    )
+
+
+def _fmt_sharpe(result: dict) -> str:
+    return (
+        f"**📈 Sharpe Ratio — {result['ticker']} ({result['period']})**\n\n"
+        f"- Sharpe Ratio  : **{result['sharpe_ratio']}**\n"
+        f"- Rating        : {result['rating']}\n"
+        f"- Annual Return : {result['annual_return']}%\n"
+        f"- Volatility    : {result['volatility']}%\n"
+        f"- Risk-Free Rate: {result['risk_free_rate'] * 100:.2f}% (assumed)"
+    )
+
+
 # =========================================
 # DETECT CALCULATION FROM QUERY
 # =========================================
@@ -619,14 +649,7 @@ def detect_and_run_calculation(query: str, tickers: list) -> str | None:
                     period_str = p(m.group(1))
                     break
 
-            amount = 10000
-            amt_m  = re.search(r'\$?\s*([\d,]+)\s*(k|m|b)?', q)
-            if amt_m:
-                v = float(amt_m.group(1).replace(",",""))
-                s = (amt_m.group(2) or "").lower()
-                if s == "k": v *= 1000
-                elif s == "m": v *= 1_000_000
-                amount = v
+            amount = _parse_amount(q)   # FIX: "5 months" used to be read as $5,000,000
 
             days = 10
             dm = re.search(r'(\d+)\s*day', q)
@@ -698,11 +721,19 @@ def detect_and_run_calculation(query: str, tickers: list) -> str | None:
                     ticker = tickers[0] if tickers else None
                     if not ticker:
                         return "⚠️ Please specify a ticker."
-                    result = calc_func(ticker, period_str)
+                    # FIX: pass the period BY NAME. Positionally it landed in
+                    # calculate_sharpe_ratio's risk_free_rate slot -> the 'subtract' error.
+                    if "period" in inspect.signature(calc_func).parameters:
+                        result = calc_func(ticker, period=period_str)
+                    else:
+                        result = calc_func(ticker, period_str)
 
                 return format_calculation_result(result)
 
-            except Exception as e:
-                return f"⚠️ Calculation error: {str(e)}"
+            except Exception:
+                # Full traceback goes to the server log, the user gets a clean message.
+                logger.exception("Calculation failed (calc=%s, query=%r)", calc_name, query)
+                return ("⚠️ I couldn't complete that calculation right now. "
+                        "Please check the ticker and try again.")
 
     return None

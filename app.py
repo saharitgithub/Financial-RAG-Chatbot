@@ -16,14 +16,14 @@ import streamlit as st
 import pickle
 import re
 
-from utils.finance_guard import is_finance_query_llm as is_finance_query
+from utils.finance_guard import is_finance_query
 from rag.generator import generate_answer
 from embeddings.embedder import get_embedding
 from rag.retriever import retrieve
 from finance_data import (
     detect_tickers, detect_investment_query, detect_switch_query,
     build_investment_answer, detect_spelling_query,
-    build_ticker_answer, detect_graph_period,
+    build_ticker_answer, detect_graph_period, typo_correction_note,
 )
 from calculations import detect_and_run_calculation
 from visualization import build_3d_chart, build_comparison_chart
@@ -44,8 +44,31 @@ st.set_page_config(
 
 st.markdown("""
 <style>
+/* Fix sidebar caption/text opacity */
+.stSidebar p,
+.stSidebar span,
+.stSidebar small,
+.stSidebar [data-testid="stCaptionContainer"] p {
+    color: #bbbbbb !important;
+    opacity: 1 !important;
+}   
 .main, .stApp { background-color: #0E1117; color: white; }
-h1, h2, h3, h4, p, div, label, span { color: white !important; }
+h1, h2, h3, h4 { color: white !important; }
+.user-msg, .bot-msg, .source-badge, .sidebar-msg { color: white !important; }
+.stChatInput textarea,
+[data-testid="stChatInputTextArea"] {
+    color: #000000 !important;
+    background-color: #ffffff !important;
+}
+
+.stSelectbox div[data-baseweb="select"] span,
+.stSelectbox div[data-baseweb="select"] div {
+    color: #000000 !important;
+}
+
+input[type="text"], input[type="search"] {
+    color: #000000 !important;
+}
 section[data-testid="stSidebar"] { background-color: #111827; }
 .user-msg {
     background-color: #1565C0; padding: 12px 16px;
@@ -88,26 +111,8 @@ hr { border-color: #2a2a3a; }
 
 @st.cache_resource
 def load_store():
-    from vectorstore.faiss_store import VectorStore
-
-    if not os.path.exists("faiss_store.index"):
-        with st.spinner("🔧 First-time setup: building knowledge base from PDFs... this may take a few minutes."):
-            from ingestion.load_pdfs import load_pdfs
-            from ingestion.chunker import chunk_text
-
-            build = VectorStore()
-            docs = load_pdfs("data")
-
-            for doc in docs:
-                chunks = chunk_text(doc)
-                for c in chunks:
-                    emb = get_embedding(c)
-                    build.add(emb, c)
-
-            build.save("faiss_store")
-            return build
-
-    return VectorStore.load("faiss_store")
+    with open("faiss_store.pkl", "rb") as f:
+        return pickle.load(f)
 
 store = load_store()
 
@@ -159,6 +164,20 @@ PERIOD_LABEL_MAP = {
     "2y": "2 years", "5y": "5 years", "max": "all time",
 }
 
+# Rules appended to every LLM prompt so the analysis stays grounded in the supplied data.
+LLM_RULES = (
+    "\n\nRules:\n"
+    "- Use ONLY the numbers in the data above. Do not mention indicators "
+    "(RSI, MACD, moving averages) unless they appear in the data.\n"
+    "- Do not call the 52-week high or low 'support' or 'resistance'; compare "
+    "the current price to that range instead.\n"
+    "- Describe today's move and the weekly move separately.\n"
+    "- If a '52W Position' figure is given, use it to say where the price sits in its 52-week "
+    "range (0% = low, 100% = high); do not call a mid-range price 'near the low' or 'near the high'.\n"
+    "- A higher P/E means a more expensive valuation, not a better one.\n"
+    "- End with: 'This is not financial advice.'"
+)
+
 # =========================================
 # SIDEBAR
 # =========================================
@@ -187,7 +206,23 @@ with st.sidebar:
             st.rerun()
     with c2:
         if st.button("❌ Exit"):
-            st.stop()
+            st.session_state.exited = True
+            st.rerun()
+
+# =========================================
+# EXIT SCREEN
+# =========================================
+# st.stop() inside the sidebar used to halt the script BEFORE the chat box was drawn,
+# so after "Exit" there was nothing left to click. Now the page shows a way back.
+
+if st.session_state.get("exited"):
+    st.info("👋 Chat ended. Click below to start a new chat.")
+    if st.button("🔄 Start new chat"):
+        st.session_state.messages     = []
+        st.session_state.anim_playing = {}
+        st.session_state.exited       = False
+        st.rerun()
+    st.stop()
 
 # =========================================
 # MAIN AREA
@@ -291,13 +326,16 @@ if query:
                         query,
                         f"User wants a {period_label} price chart for {detected[0]}.\n\n"
                         f"Live market data:\n{combined_data}\n\n"
-                        f"Provide professional technical analysis:\n"
-                        f"1. Current price and {period_label} trend direction\n"
-                        f"2. Key support and resistance levels from 52W range\n"
-                        f"3. Volume and momentum\n"
+                        f"Provide professional analysis:\n"
+                        f"1. Current price and where it sits within the 52-week range. You only have "
+                        f"52-week and weekly figures, so do not describe the {period_label} trend; "
+                        f"refer the reader to the chart below for that.\n"
+                        f"2. Weekly price action (open, high, low, close)\n"
+                        f"3. Volume\n"
                         f"4. Short-term outlook\n\n"
                         f"IMPORTANT: The 3D animated chart is already displayed below. "
-                        f"Do NOT say you cannot show graphs. Start directly with the analysis.",
+                        f"Do NOT say you cannot show graphs. Start directly with the analysis."
+                        + LLM_RULES,
                     )
             else:
                 # Multi-ticker comparison chart + analysis
@@ -307,12 +345,14 @@ if query:
                         f"User wants a {period_label} comparison chart for {' vs '.join(detected)}.\n\n"
                         f"Live market data:\n{combined_data}\n\n"
                         f"Provide detailed comparison:\n"
-                        f"1. Price performance over {period_label} for each stock\n"
-                        f"2. Which performed better and by how much\n"
+                        f"1. Current price and recent (weekly) performance of each stock; the "
+                        f"{period_label} performance is shown in the chart below\n"
+                        f"2. Which looks stronger on the supplied numbers\n"
                         f"3. Fundamental comparison (market cap, P/E, revenue)\n"
                         f"4. Risk comparison and outlook\n\n"
                         f"IMPORTANT: The 3D comparison chart is displayed below. "
-                        f"Do NOT say you cannot show graphs.",
+                        f"Do NOT say you cannot show graphs."
+                        + LLM_RULES,
                     )
             source_msg  = "📊🤖 *Source: Live market data (yfinance) + AI analysis.*"
             show_source = True
@@ -350,7 +390,8 @@ if query:
                     f"2. Historical performance of the target stock\n"
                     f"3. Risk factors to consider\n"
                     f"4. Whether this switch makes financial sense\n"
-                    f"5. Recommendation",
+                    f"5. Recommendation"
+                    + LLM_RULES,
                 )
 
             answer      = f"{calc_result}\n\n{target_data}\n\n---\n\n**💡 Investment Analysis:**\n{llm_part}"
@@ -364,6 +405,9 @@ if query:
 
             if calc_result:
                 chart_tickers = [detected[0]]
+                # Calculations use 1 year of data unless the user gave years/months, so match the chart.
+                chart_period  = (detect_graph_period(query)
+                                 if re.search(r"\d+\s*(year|month)", query.lower()) else "1y")
 
                 # Append LLM reasoning to calculation result
                 with st.spinner("🤖 Generating analysis..."):
@@ -373,9 +417,11 @@ if query:
                         f"{calc_result}\n\n"
                         f"Provide professional financial interpretation:\n"
                         f"1. What this metric means for investors\n"
-                        f"2. How this compares to industry benchmarks\n"
+                        f"2. How to read this number (no industry or peer benchmark data is "
+                        f"provided, so do not quote any)\n"
                         f"3. Risk implications\n"
-                        f"4. Actionable insights",
+                        f"4. Actionable insights"
+                        + LLM_RULES,
                     )
                 answer      = f"{calc_result}\n\n---\n\n**💡 Analysis & Insights:**\n{llm_part}"
                 source_msg  = "📊🤖 *Source: Real-time calculations (yfinance) + AI analysis.*"
@@ -412,7 +458,8 @@ if query:
                     f"4. Growth prospects and competitive position\n"
                     f"5. Risk factors for each\n"
                     f"6. Which is the better investment right now and why\n"
-                    f"Be specific, data-driven, and professional.",
+                    f"Be specific, data-driven, and professional."
+                    + LLM_RULES,
                 )
             source_msg  = "📊🤖 *Source: Live market data (yfinance) + AI analysis.*"
             show_source = True
@@ -431,7 +478,8 @@ if query:
                     query,
                     f"Strategic investment question about: {', '.join(detected)}\n\n"
                     f"Live market data:\n{combined}\n\n"
-                    f"Provide professional strategic analysis and recommendation.",
+                    f"Provide professional strategic analysis and recommendation."
+                    + LLM_RULES,
                 )
             source_msg  = "📊🤖 *Source: Live market data (yfinance) + AI analysis.*"
             show_source = True
@@ -442,7 +490,7 @@ if query:
             with st.spinner("📈 Calculating investment returns..."):
                 calc_result = build_investment_answer(inv)
 
-            chart_tickers = inv["tickers"]
+            chart_tickers = inv.get("tickers", [inv["target"]] if inv.get("target") else [])
 
             # LLM commentary on the result
             with st.spinner("🤖 Generating investment commentary..."):
@@ -452,7 +500,8 @@ if query:
                     f"Provide brief professional commentary:\n"
                     f"1. Was this a good investment decision?\n"
                     f"2. Risk assessment\n"
-                    f"3. Forward-looking recommendation",
+                    f"3. Forward-looking recommendation"
+                    + LLM_RULES,
                 )
             answer      = f"{calc_result}\n\n---\n\n**💡 Commentary:**\n{llm_part}"
             source_msg  = "📊🤖 *Source: Live historical data (yfinance) + AI analysis.*"
@@ -476,9 +525,12 @@ if query:
                     f"2. Financial analysis and current market outlook\n"
                     f"3. Key risks and opportunities\n"
                     f"4. Buy / Hold / Sell consideration with reasoning\n"
-                    f"Be concise, data-driven, and professional.",
+                    f"Be concise, data-driven, and professional.\n"
+                    f"If the question is a single fact (CEO, market cap, price, yield), answer it "
+                    f"in 1-2 sentences and skip items 3 and 4."
+                    + LLM_RULES,
                 )
-            answer      = f"{yf_answer}\n\n---\n\n**🤖 Analysis & Insights:**\n{llm_part}"
+            answer      = f"{typo_correction_note(query)}{yf_answer}\n\n---\n\n**🤖 Analysis & Insights:**\n{llm_part}"
             source_msg  = "📊🤖 *Source: Live market data (yfinance) + AI analysis.*"
             show_source = True
 
@@ -496,7 +548,8 @@ if query:
                     query,
                     f"Multiple tickers detected: {', '.join(detected)}\n\n"
                     f"Live data:\n{combined}\n\n"
-                    f"Answer the user's question and provide relevant analysis.",
+                    f"Answer the user's question and provide relevant analysis."
+                    + LLM_RULES,
                 )
             answer      = f"{combined}\n\n---\n\n**🤖 Analysis:**\n{llm_part}"
             source_msg  = "📊🤖 *Source: Live market data (yfinance) + AI analysis.*"
@@ -544,12 +597,6 @@ if query:
             else:
                 source_msg  = "🤖 *Source: Answer generated by AI.*"
                 show_source = True
-
-    # ── Strip any LLM-hallucinated markdown image tags ──
-    # The LLM sometimes writes ![...](...) thinking it's "showing" a chart,
-    # but real charts are rendered separately via st.plotly_chart() below.
-    # This text-based image syntax is fake and just shows a broken image icon.
-    answer = re.sub(r'!\[[^\]]*\]\([^\)]*\)', '', answer).strip()
 
     # ── Save + rerun ──
     st.session_state.messages.append({

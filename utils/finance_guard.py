@@ -67,7 +67,8 @@ DOMAIN_KEYWORDS = [
     "efficient market", "systematic risk", "unsystematic risk",
     "rebalancing", "compounding", "time value of money", "opportunity cost",
     "risk premium", "deflation", "recession", "bull market", "bear market",
-    "fixed income", "commodity", "real estate", "capital gain", "coupon", "maturity",
+    "fixed income", "commodity", "commodities", "oil price", "price of oil", "crude oil", "gold price",
+    "natural gas", "real estate", "capital gain", "coupon", "maturity",
     "hedge fund", "private equity", "venture capital", "ipo", "financial ratio",
     "liquidity ratio", "solvency", "working capital", "gross margin", "net margin",
     "operating margin", "roe", "roa", "earnings per share", "eps", "debt to equity",
@@ -83,6 +84,14 @@ DOMAIN_KEYWORDS = [
     "autocorrelation", "heteroscedasticity", "multicollinearity",
     "stationarity", "adf test", "augmented dickey fuller",
     "monte carlo", "simulation", "bootstrap", "bayes", "bayesian",
+    # Mathematics & Algebra
+    "sum", "addition", "subtract", "multiply", "divide", "calculate",
+    "formula", "equation", "algebra", "arithmetic", "mathematics", "math",
+    "quadratic", "polynomial", "derivative", "integral", "calculus",
+    "logarithm", "exponent", "matrix", "vector", "linear", "geometry",
+    "percentage", "ratio", "average", "mean", "median", "mode",
+    "square root", "cube root", "factorial", "prime", "number",
+    "solve", "simplify", "expand", "factor",
 ]
 
 NON_FINANCE_TERMS = [
@@ -94,6 +103,9 @@ NON_FINANCE_TERMS = [
     "politics", "government", "travel", "vacation", "fashion", "makeup", "beauty",
     "weather", "health", "medical", "biology", "chemistry", "physics",
 ]
+
+# Requests that are never finance, whatever other words they contain.
+OFF_TASK_TERMS = ["joke", "riddle", "poem", "lyrics", "recipe", "horoscope"]
 
 
 def _contains_term(query: str, terms):
@@ -118,11 +130,19 @@ def is_finance_query(query: str) -> bool:
     q = query.strip().lower()
     if not q:
         return False
-    if _contains_non_finance_term(q, NON_FINANCE_TERMS):
+
+    # 1. Off-task requests are always refused ("tell me a joke about stocks").
+    if _contains_non_finance_term(q, OFF_TASK_TERMS):
         return False
-    if _contains_term(q, DOMAIN_KEYWORDS):
-        return True
-    return False
+
+    has_finance = _contains_term(q, DOMAIN_KEYWORDS)
+
+    # 2. A non-finance TOPIC word only blocks the query when there is no finance signal
+    #    ("how does weather affect oil prices" has both -> allowed).
+    if _contains_non_finance_term(q, NON_FINANCE_TERMS) and not has_finance:
+        return False
+
+    return has_finance
 
 
 def call_openrouter(prompt: str) -> str:
@@ -137,7 +157,9 @@ def call_openrouter(prompt: str) -> str:
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.0,
         },
+        timeout=30,                 # never hang the app on a slow API call
     )
+    response.raise_for_status()     # clear HTTP error instead of a KeyError on the JSON
     return response.json()["choices"][0]["message"]["content"]
 
 
