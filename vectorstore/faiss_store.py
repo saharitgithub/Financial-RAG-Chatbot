@@ -1,7 +1,10 @@
 import json
 import os
+
 import faiss
 import numpy as np
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class VectorStore:
@@ -43,8 +46,10 @@ class VectorStore:
                 results.append((self.texts[idx], float(dist)))
 
         return results
-    
+
     def save(self, folder="store"):
+        if not os.path.isabs(folder):
+            folder = os.path.join(_ROOT, folder)
         os.makedirs(folder, exist_ok=True)
         faiss.write_index(self.index, os.path.join(folder, "faiss.index"))
         with open(os.path.join(folder, "texts.json"), "w", encoding="utf-8") as f:
@@ -52,8 +57,15 @@ class VectorStore:
 
     @classmethod
     def load(cls, folder="store"):
+        if not os.path.isabs(folder):
+            folder = os.path.join(_ROOT, folder)
+        index_path = os.path.join(folder, "faiss.index")
+        texts_path = os.path.join(folder, "texts.json")
+        for p in (index_path, texts_path):
+            if not os.path.exists(p):
+                raise FileNotFoundError(f"Missing store file: {p}")
         store = cls()
-        store.index = faiss.read_index(os.path.join(folder, "faiss.index"))
-        with open(os.path.join(folder, "texts.json"), "r", encoding="utf-8") as f:
+        store.index = faiss.read_index(index_path)
+        with open(texts_path, "r", encoding="utf-8") as f:
             store.texts = json.load(f)
         return store
