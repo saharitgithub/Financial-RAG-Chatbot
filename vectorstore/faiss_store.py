@@ -1,6 +1,7 @@
+import json
+import os
 import faiss
 import numpy as np
-import pickle
 
 
 class VectorStore:
@@ -42,25 +43,17 @@ class VectorStore:
                 results.append((self.texts[idx], float(dist)))
 
         return results
-
-    # ── SAFE SERIALIZATION ──────────────────────────────
-    # FAISS index objects are C++ objects wrapped via SWIG and are NOT
-    # reliably picklable across different environments/versions
-    # (this is exactly what crashed on Streamlit Cloud).
-    # Fix: serialize the FAISS index using FAISS's own native format,
-    # and pickle only the plain Python `texts` list separately.
-
-    def save(self, path_prefix):
-        """Save index + texts. Creates: {path_prefix}.index and {path_prefix}.texts.pkl"""
-        faiss.write_index(self.index, f"{path_prefix}.index")
-        with open(f"{path_prefix}.texts.pkl", "wb") as f:
-            pickle.dump(self.texts, f)
+    
+    def save(self, folder="store"):
+        os.makedirs(folder, exist_ok=True)
+        faiss.write_index(self.index, os.path.join(folder, "faiss.index"))
+        with open(os.path.join(folder, "texts.json"), "w", encoding="utf-8") as f:
+            json.dump(self.texts, f, ensure_ascii=False)
 
     @classmethod
-    def load(cls, path_prefix):
-        """Load index + texts back into a VectorStore instance."""
+    def load(cls, folder="store"):
         store = cls()
-        store.index = faiss.read_index(f"{path_prefix}.index")
-        with open(f"{path_prefix}.texts.pkl", "rb") as f:
-            store.texts = pickle.load(f)
+        store.index = faiss.read_index(os.path.join(folder, "faiss.index"))
+        with open(os.path.join(folder, "texts.json"), "r", encoding="utf-8") as f:
+            store.texts = json.load(f)
         return store

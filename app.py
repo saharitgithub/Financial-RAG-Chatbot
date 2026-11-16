@@ -15,6 +15,8 @@ os.environ["STREAMLIT_WATCHER_TYPE"] = "none"
 import streamlit as st
 import pickle
 import re
+import faiss
+from vectorstore.faiss_store import VectorStore
 
 from utils.finance_guard import is_finance_query
 from rag.generator import generate_answer
@@ -111,8 +113,7 @@ hr { border-color: #2a2a3a; }
 
 @st.cache_resource
 def load_store():
-    with open("faiss_store.pkl", "rb") as f:
-        return pickle.load(f)
+    return VectorStore.load("store")
 
 store = load_store()
 
